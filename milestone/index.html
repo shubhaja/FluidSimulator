@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {
+    padding: 100px;
+    width: 1000px;
+    margin: auto;
+    text-align: left;
+    font-weight: 300;
+    font-family: 'Open Sans', sans-serif;
+    color: #121212;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Source Sans Pro', sans-serif;
+  }
+  pre code {
+    background-color: #eee;
+    border: 1px solid #999;
+    display: block;
+  }
+</style>
+<title>Milestone Status Report</title>
+</head>
+<body>
+
+<h1>Milestone Status Report</h1>
+<h2>Team: Sharie Wang, Shannon Hu, Shubha Jagannatha</h2>
+<h2><a href="https://youtu.be/LhQz1mZ38ME">Video</a>, <a href="https://docs.google.com/presentation/d/11GaIWEyZmv7YMGasDNsDTOYpSIxCHYvJcjSVA3lVkw8/edit?usp=sharing">Slides</a></h2>
+<h2>Accomplishments</h2>
+<p>
+	We have the majority of our shader framework, which is written in Three.js, completed.
+	By following an online smoke shader tutorial and referencing
+	Nvidia's Fast Fluid Dynamics Simulation paper, we have set up the framework
+	and have also written a couple of different shaders, including: advection,
+	buoyancy, divergence, Jacobi iteration, and the subtract gradient shader for projection
+	for solving the Navier-Stokes equations.
+</p>
+<h3>Pipeline</h3>
+<p>
+	We keep <code>pressure</code> and <code>velocity</code> grids to track
+	the movement of each particle in our simulation. It also contains two scalar values,
+	<code>temperature</code> and <code>density</code>. Temperature affects the
+	buoyancy of the smoke, while density refers to the density of the smoke
+	when a user clicks on the screen to create a smoke source. The general pipeline is as follows:
+</p>
+
+<pre>
+	<code>
+		velocity = externalForces(diffuse(advection(velocity)));
+		pressure = computePressure(velocity);
+		velocity = subtractPressureGradient(velocity, pressure);
+
+	</code>
+</pre>
+
+<p>
+	The basic structure of our shader material is as follows:
+</p>
+<pre>
+	<code>
+		material = new THREE.ShaderMaterial( {
+		uniforms: {
+			res: {type: 'v2', value: new THREE.Vector2(width, height)},
+		},
+		fragmentShader: window.shaders.shader
+		})
+		plane = new THREE.PlaneBufferGeometry(window.innerWidth, window.innerHeight);
+		object = new THREE.Mesh(plane, material);
+		scene = new THREE.Scene();
+		scene.add(object);
+	</code>
+</pre>
+
+<p>
+The uniforms are passed into the custom shader through this material object. We define
+the shaders in a separate Javascript file for clarity.
+</p>
+
+
+<p>Lastly, we call a render function to use these shaders. We ensure that we are
+using a buffer texture in order to save intermediate results before passing it on
+to the next step in our shader pipeline.</p>
+<h2>Preliminary Results</h2>
+
+<div align="center">
+	<table style="width:100%">
+		<tr>
+			<td align="middle">
+				<img src="img/demo.png" width="480px" />
+				<figcaption align="middle">Smoke evaporating based on user input</figcaption>
+			</td>
+		</tr>
+	</table>
+</div>
+<h2>Progress</h2>
+<p>
+	Compared to the timeline we presented in our final project report, we are on track. We
+	planned to finish our shaders by Week 3. We have the implementations for the ones
+	mentioned above finished, but have not yet integrated them together. This will
+	be our main focus in the next week. Now that we have more clarity with
+	regards to the different parts of this project and what we have to
+	accomplish, we will revise our plan to be more detailed.
+</p>
+
+</body>
+</html>

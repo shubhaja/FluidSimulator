@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body {
+    padding: 100px;
+    width: 1000px;
+    margin: auto;
+    text-align: left;
+    font-weight: 300;
+    font-family: 'Open Sans', sans-serif;
+    color: #121212;
+  }
+  h1, h2, h3, h4 {
+    font-family: 'Source Sans Pro', sans-serif;
+  }
+  pre code {
+    background-color: #eee;
+    border: 1px solid #999;
+    display: block;
+  }
+</style>
+<title>Final Report</title>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+</head>
+<body>
+    <h1>Final Report</h1>
+    <h3>Team: Sharie Wang, Shannon Hu, Shubha Jagannatha</h2>
+    <p><a href="https://youtu.be/zUlNX_ZCPts">Video</a></p>
+    <p>Previously: <a href="milestone.html">Milestone Status Report</a></p>
+
+
+    <h2>Abstract</h2>
+    <p>For our final project, we implemented a 2D fluid simulator using Three.js, which uses WebGL for rendering graphics.
+        We used the Navier-Stokes equations to model the fluid behavior. Our implementation uses a 2D grid in order to keep
+        track of the system dynamics as time passes, and a variety of fragment shaders extract information from the grids in
+        order to produce a visual representation of fluid. Our simulation responds to user input, and there is a GUI
+        available in order to manipulate different parameters of the system to achieve different results. The simulation can be found
+        <a href="https://shariewang.github.io/cs184-fluid/demo/">here</a>.
+    </p>
+    <h2>Technical Approach</h2>
+
+    Our implementation is based on the Navier Stokes equation for homogeneous incompressible fluids, and we referenced this <a href="http://developer.download.nvidia.com/books/HTML/gpugems/gpugems_ch38.html">Fast Fluid Dynamics Simulation</a>:
+    \[\frac{\delta\pmb{u}}{\delta t} = {-(\pmb{u}\cdot\nabla)\pmb{u} - \frac{1}{\rho}\nabla p + v\nabla^2\pmb{u} + \pmb{F}}\]
+    \[\nabla\cdot \pmb{u} = 0\]
+
+    In these equations, \(\mathbf{u}\) is the velocity field, \(\mathbf{\rho}\) is density, \(\mathbf{p}\) is pressure, \(\mathbf{v}\) is viscosity, and \(\mathbf{F}\) represents additional forces.
+    We also added a buoyant force in order to simulate the evaporation of fluid over time. If we extract parts out of the whole equation, we have: advection,
+    pressure, diffusion, and external forces.
+
+    <h2>Framework</h2>
+
+    <p>There are four fluid properties for which we track for rendering purposes: velocity, pressure, density, vorticity, and temperature.
+    Temperature is solely used in order to affect the buoyant force - the hotter the temperature is, the more buoyant
+    we expect the fluid to behave. The rest of the properties all affect how the fluid shows up on the screen and is ultimately
+    tracked in the density property. In Three.js, these are represented as textures. Each property is associated with two textures - for buffering purposes
+    - in order to allow reading from and writing to it simultaneously. We swap the two textures after each operation.</p>
+
+    <h2>
+
+    <h3>Advection</h3>
+    <p>fluid has velocity, so it transports other quantities along with it, such as density. For example, if we have colored fluid,
+    the color is carried along with the fluid; the color is transported, or advected, along the fluid's velocity field. Advection is
+    represented by the first term on the right hand side of the equations above. In order to compute the effect of advection
+    on the velocity field at each time step, we update the velocity of each point in our grid. Because Euler's explicit
+    integration method is unstable for large time steps, we use an implicit method and trace the trajectory of a particle
+    from each grid cell back in time to its former position and copy the quantities at that position to our starting grid cell. This
+    advection update is described by the following equation, and can be applied to a variety of quantities \(\mathbf{x}\). In our simulation, we
+    have applied it to velocity, temperature, and density.</p>
+
+    \[q(\mathbf{x}, t + \delta{t}) = q(\mathbf{x} - \mathbf{u}(\mathbf{x}, t)\delta{t}, t)\]
+
+    <h3>Pressure</h3>
+
+    <p>Particles in a system move around each other. When a force is applied to a fluid, the particles closest
+    to the source of the force push on the ones that are farther away. Over time, pressure builds up. This
+    leads to acceleration, which is represented by the second term in the Navier Stokes equation. We will solve the
+    pressure part of the equation using an iterative relaxation technique called Jacobi iteration, which is described
+    in more detail in the diffusion section below, which also uses the same technique.</p>
+
+    <h3>Diffusion</h3>
+    <p>Viscous fluids have a resistance to flow, which results in dissipation of velocity over time. The equation
+    modelling diffusion is represented by the third term in the Navier Stokes equation. Like the case for advection,
+    the explicit Euler method is unstable. Instead, we use an implicit formulation: </p>
+
+    \[(\mathbf{I} - v\delta t\nabla^2)\mathbf{u}(\mathbf{x},t + \delta{t}) = \mathbf{u}(\mathbf{x},t)\]
+
+    <p>This equation is essentially a Poisson equation, which can be solved using an iterative relaxation technique called Jacobi iteration.
+    This technique starts with an approximate solution and improves it every iteration. We discretize and rewrite the above equation into</p>
+
+    \[x_{i,j}^{(k+1)} = \frac{x_{i-1,j}^{(k)}+x_{i+1,j}^{(k)}+x_{i,j-1}^{(k)}+x_{i,j+1}^{(k)}+\alpha b_{i,j}}{\beta} \]
+
+    <h3>External Forces</h3>
+
+    <p>Local or body forces are incorporated into the simulation here. In our simulation, local forces are applied
+    to a specific portion of the particles via user clicks, which initiate the fluid. Body forces are applied evenly
+    to the entire fluid. In our simulation, we include a buoyant body force to represent the evaporation of fluid.</p>
+
+    <h3>Extension: Vorticity</h3>
+
+    <p>The motion of low-viscosity fluids contains some sort of rotational force, also known as vorticity. Normally,
+    simulation on a grid dampens out these effects, so we add them back into our simulation using vorticity confinement
+    for more prominent effects.</p>
+    <p>First, we compute the vorticity \(\mathbf{w} = \nabla \times \mathbf{u}\)</p>. Then, we compute a normalized
+    vorticity vector field:</p>
+
+    \[\Psi = \frac{\eta}{|\eta|}, \eta = \nabla|\omega|\]
+
+    <p>From here, we can compute a correction force to restore the amount of voriticity that is estimated to have dissipated:</p>
+
+    \[f_{vc} = \epsilon(\mathbf{\Psi} \times \omega)\delta x\]
+
+    <h3>Boundary Conditions</h3>
+
+    <p>Since we are solving a differential equation in a finite domain, we must apply boundary conditions, which
+    determine how to compute values at the edges of our display. During each time step, we update the velocity and
+    pressure quantities, which means that we need to define boundary conditions for both properties. For velocity,
+    we assume that the velocity goes to zero at the edges since we are simulating a fluid in a box. Thus, it cannot
+    flow through the sides of the display. For pressure, the correct solution to the Poisson equation requires
+    pure Neumann boundary coniditons, which means that at a boundary, the rate of change of pressure in the direction
+    normal to the boundary is zero.</p>
+
+    <h4>Extension: Arbitrary Boundaries </h2>
+    <p>We also implemented arbitrary boundaries in our simulation. Users in the GUI are able to create
+    arbitrary obstacles. In order to implement this, we determined for each cell, in which directions the boundaries
+    lie in order to compute the correct boundary values.</p>
+
+    <h2>Problems</h2>
+
+    <p>A challenge that we faced was that our starter framework from the Smoke Tutorial we followed
+        was very simplistic. For example, the buoyant force was faked by adjusting some weights
+        such that the simulation looked "correct" - it wasn't necessarily based on physical laws. Our
+        implementation was also hard to debug in the beginning when we weren't familiar with how our
+        project was to be done. We didn't know how to test shaders, so we wrote a lot of our code
+        in the beginning and then went back to debug. We tackled our debugging issue by reading
+        the equations very carefully and making sure that our variables corresponded to the correct things.
+    </p>
+
+    <h2>Lessons</h2>
+    <p>In retrospect, the biggest takeway from this project was the difficulty of simulating real life
+    on computers with graphics. This was something that we felt even at the beginning of the course when
+    we learned about rasterization and sampling artifacts, but it was made much more apparent through this
+    fluid simulation. We were also able to interface with a real-world example of how Euler's implicit method
+    for solving differential equations is impractical and instable. Through this project, we have gained
+    much more appreciation for computer games that are able to display realistic scenes.</p>
+
+    <h2>Results</h2>
+
+    <p>Running the simulation is the best way to see our results, but a couple of screenshots have been
+        added below for a quick overview.
+    </p>
+
+    <div align="middle">
+      <table style="width:100%">
+        <tr>
+          <td>
+            <img src="demo1.png" align="middle" width="400px" />
+          </td>
+          <td>
+            <img src="demo2.png" align="middle" width="400px" />
+          </td>
+          <td>
+            <img src="demo3.png" align="middle" width="200px" />
+          </td>
+        </tr>
+      </table>
+    </div>
+
+
+    <h2>References</h2>
+
+    <ul>
+      <li><a href="http://developer.download.nvidia.com/books/HTML/gpugems/gpugems_ch38.html">Fast Fluid Dynamics Simulation</a></li>
+      <li><a href="https://gamedevelopment.tutsplus.com/tutorials/how-to-write-a-fluid-shader--cms-25587">How to Write a fluid Shader</a></li>
+    </ul>
+
+    <h2>Contributions</h2>
+    <p>Sharie: Initial framework setup and starter code, projection shaders, shader debugging, midway and final report + slides</p>
+    <p>Shannon: Wrote the advection, divergence, gradient, boundary, vorticity, and display shaders. Added parameters, the reset buttons, and dynamic boundary creation to the GUI.</p>
+    <p>Shubha: shaders for buoyancy, adding external velocity, density, and temperature; visualizer GUI; midway and final videos  + slides</p>
+</body>

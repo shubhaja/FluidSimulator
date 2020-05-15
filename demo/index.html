@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>CS184 Final Project: Smoke Simulation</title>
+		<style>
+			body { margin: 0; }
+		</style>
+	</head>
+	<body>
+		<script src="js/shaders.js"></script>
+		<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r71/three.min.js"></script>
+		<script type="text/javascript" src="js/dat.gui.js"></script>
+		<div id = "my-gui-container" style="position:absolute; top:0; right:0; z-index:100;"></div>
+		<script>
+
+			/* GUI START */
+			var input;
+
+			// Initializes container with default parameters
+			var Input = function() {
+				this.Display = 'Density';
+				// How much density is added on user click
+				this.Density = 0.2;
+				// How much temperature is added on user click
+				this.Temperature = 0.05;
+				// scalar field used to calculate buoyancy: adds force when local temperature
+				// is higher than some ambient temperature (just use room?)
+				this.AmbientTemp = 0;
+				// buoyancy coefficient
+				this.Buoyancy = 1;
+				// weight of fluid for calculating effect of gravity
+				this.Weight = 0.00001;
+				// scalar field representing timestep size
+				this.Timestep = 0.1;
+				// String field representing hexadecimal color code
+				this.Color = '#c1c1eb';
+				// viscosity of the fluid
+				this.Viscosity = 0.1;
+				// radius of desired user input
+				this.Radius = 10;
+				// grid spacing (in pixels?). grid cells must be squares
+				this.dx = 1;
+				// Toggle for boundary conditions
+				this.UseBoundaries = true;
+				// Scale factor to make sure texture values show up
+				this.ScaleColor = 1;
+				// Bias term to make sure negative values show up
+				this.BiasColor = 0;
+				// Toggle for whether to add smoke or boundaries
+				this.Mode = 'Add Smoke';
+				// Scale parameter for vorticity
+				this.Epsilon = 1;
+				// Toggle for showing boundaries
+				this.ShowBoundaries = true;
+				// Toggle for showing velocity values at the boundary
+				this.ShowInsideBoundaries = 0;
+				// Number of iterations to perform Jacobi diffusion for.
+				this.JacobiIterations = 20;
+				// Button to remove boundaries
+				this.ResetBoundary = function() {resetBoundary()};
+				// Button to remove fluid
+				this.ResetFluid = function() {resetDisplayTextures()};
+			};
+
+			input = new Input();
+
+			var gui;
+
+			// Variables for tracking bounding box of gui
+			var rect;
+			var left;
+			var right;
+			var top;
+			var bot;
+
+
+			gui = new dat.GUI();
+			// Initialize the gui when the window is loaded
+			window.onload = function() {
+				gui.add(input, 'Mode', ['Add Smoke', 'Add Boundaries']);
+				gui.add(input, 'Display', [ 'Density', 'Temperature', 'Velocity', 'Pressure', 'Divergence', 'Vorticity', 'Normalized Vorticity'] );
+				gui.add(input, 'Timestep', 0, 0.2);
+				gui.addColor(input, 'Color');
+
+				// Folder containing user input parameters
+				var userInput = gui.addFolder("Input");
+				userInput.add(input, 'Radius', 0, 20);
+				userInput.add(input, 'Density', 0, 1);
+				userInput.add(input, 'Temperature', -1, 1);
+
+				// Folder containing buoyancy parameters
+				var buoyancyParams = gui.addFolder("Buoyancy");
+				buoyancyParams.add(input, 'AmbientTemp', -1, 1);
+				buoyancyParams.add(input, 'Buoyancy', -1, 1);
+				buoyancyParams.add(input, 'Weight', 0, 1);
+
+				// Folder containing jacobi iteration parameters
+				var jacobiParams = gui.addFolder("Jacobi");
+				jacobiParams.add(input, 'JacobiIterations', 1, 80);
+
+				// Folder containing diffusion parameters
+				var diffusionParams = gui.addFolder("Diffusion");
+				diffusionParams.add(input, 'Viscosity', 0, 2);
+
+				// Folder containing vorticity parameters
+				var vorticityParams = gui.addFolder("Vorticity");
+				vorticityParams.add(input, 'Epsilon', 0, 2);
+
+				// Folder containing boundary parameters
+				var boundaryParams = gui.addFolder("Boundaries");
+				boundaryParams.add(input, 'UseBoundaries');
+				boundaryParams.add(input, 'ShowBoundaries');
+
+				gui.add(input, 'ResetBoundary');
+				gui.add(input, 'ResetFluid');
+
+				var customContainer = document.getElementById('my-gui-container');
+				customContainer.appendChild(gui.domElement);
+
+				rect = gui.domElement.getBoundingClientRect();
+				left = rect.left * width / window.innerWidth;
+				right = rect.right * width / window.innerWidth;
+				bot = height - ((rect.bottom + 20) * height / window.innerHeight);
+				top = height - (rect.top * height / window.innerHeight);
+			};
+			/* GUI END */
+
+			var scene;
+			var camera;
+			var renderer;
+			var scale = 0.25; // ratio of simulation window size to true window size. lower number = faster rendering
+			var viewWidth = window.innerWidth;
+			var viewHeight = window.innerHeight;
+			var width = Math.round(viewWidth * scale);
+			var height = Math.round(viewHeight * scale);
+			var res = new THREE.Vector2(width, height);
+
+			// Function to resize window automatically
+			function resize() {
+				viewWidth = window.innerWidth;
+				viewHeight = window.innerHeight;
+				renderer.setSize(viewWidth, viewHeight);
+				var width = Math.round(viewWidth * scale);
+				var height = Math.round(viewHeight * scale);
+				res = new THREE.Vector2(width, height);
+
+				rect = gui.domElement.getBoundingClientRect();
+				left = rect.left * width / window.innerWidth;
+				right = rect.right * width / window.innerWidth;
+				bot = height - ((rect.bottom + 20) * height / window.innerHeight);
+				top = height - (rect.top * height / window.innerHeight);
+			}
+			window.onresize = resize;
+
+			// Function to print contents of texture
+			function printDebug(tex) {
+				var buffer = new Uint8Array(width * height * 4);
+				renderer.readRenderTargetPixels(tex, 0, 0, width, height, buffer);
+				console.log(buffer);
+			}
+
+			// Function to set up the display
+			function scene_setup() {
+				scene = new THREE.Scene();
+
+				camera = new THREE.OrthographicCamera(width / - 2, width / 2, height / 2, height / - 2, 1, 1000);
+				camera.position.z = 2;
+
+				renderer = new THREE.WebGLRenderer();
+				renderer.setSize(viewWidth, viewHeight);
+				document.body.appendChild(renderer.domElement);
+			}
+
+			scene_setup();
+
+			// Function to convert hexadecimal color code to rgb
+			function hexToRgb(hex) {
+				var result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+				return result ? {
+			    	r: parseInt(result[1], 16),
+			    	g: parseInt(result[2], 16),
+			    	b: parseInt(result[3], 16)
+				} : null;
+			}
+
+			// Textures
+			var velA, velB;
+			var pressureA, pressureB;
+			var temperatureA, temperatureB;
+			var divergenceA, divergenceB;
+			var densityA, densityB;
+			var boundaryTextureA, boundaryTextureB;
+			var vorticityA, vorticityB;
+			var psiA, psiB;
+			var displayTexture;
+
+			// Components for the display
+			var finalMaterial;
+			var quad;
+			var plane;
+
+			// Variables used for tracking mouse position
+			var startX, startY;
+			var endX, endY;
+
+			// Materials and Scenes used for rendering to framebuffer
+			var velocityForceMaterial, velocityForceScene;
+			var temperatureForceMaterial, temperatureForceScene;
+			var densityForceMaterial, densityForceScene;
+
+			var velocityAdvectionMaterial, velocityAdvectionScene;
+			var temperatureAdvectionMaterial, temperatureAdvectionScene;
+			var densityAdvectionMaterial, densityAdvectionScene;
+
+			var buoyancyMaterial, buoyancyScene;
+			var diffusionMaterial, diffusionScene;
+			var divergenceMaterial, divergenceScene;
+			var pressureMaterial, pressureScene;
+			var gradientMaterial, gradientScene;
+			var createBoundaryMaterial, createBoundaryScene;
+			var boundaryMaterial, boundaryScene;
+			var curlMaterial, curlScene;
+			var normalizeMaterial, normalizeScene;
+			var vorticityForceMaterial, vorticityForceScene;
+			var displayMaterial, displayScene;
+			var resetMaterial, resetScene;
+
+			// Function to reset boundary to initial state
+			function resetBoundary() {
+				// Sets all values in textures to 0
+				renderer.clearTarget(boundaryTextureB, true, false, false);
+
+				// Removing boundary conditions
+				resetMaterial.uniforms.res.value = res;
+				resetMaterial.uniforms.bufferTexture.value = densityA;
+				resetMaterial.uniforms.boundaryA.value = boundaryTextureA;
+				resetMaterial.uniforms.boundaryB.value = boundaryTextureB;
+				renderer.render(resetScene, camera, densityB, false);
+				var t = densityA;
+				densityA = densityB;
+				densityB = t;
+				resetMaterial.uniforms.bufferTexture.value = temperatureA;
+				renderer.render(resetScene, camera, temperatureB, false);
+				var t = temperatureA;
+				temperatureA = temperatureB;
+				temperatureB = t;
+				resetMaterial.uniforms.bufferTexture.value = velA;
+				renderer.render(resetScene, camera, velB, false);
+				var t = velA;
+				velA = velB;
+				velB = t;
+				resetMaterial.uniforms.bufferTexture.value = pressureA;
+				renderer.render(resetScene, camera, pressureB, false);
+				var t = pressureA;
+				pressureA = pressureB;
+				pressureB = t;
+
+				renderer.clearTarget(boundaryTextureA, true, false, false);
+
+				// Create boundary texture with floor of 1 pixel
+				createBoundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+				createBoundaryMaterial.uniforms.start.value = new THREE.Vector2(0, 0);
+				createBoundaryMaterial.uniforms.end.value = new THREE.Vector2(width, 1.5);
+				renderer.render(createBoundaryScene, camera, boundaryTextureB, false);
+				var t = boundaryTextureA;
+				boundaryTextureA = boundaryTextureB;
+				boundaryTextureB = t;
+
+				// ceiling of 1 pixel
+				createBoundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+				createBoundaryMaterial.uniforms.start.value = new THREE.Vector2(0, height - 1.5);
+				createBoundaryMaterial.uniforms.end.value = new THREE.Vector2(width, height);
+				renderer.render(createBoundaryScene, camera, boundaryTextureB, false);
+				var t = boundaryTextureA;
+				boundaryTextureA = boundaryTextureB;
+				boundaryTextureB = t;
+
+				// left wall of 1 pixel
+				createBoundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+				createBoundaryMaterial.uniforms.start.value = new THREE.Vector2(0, 0);
+				createBoundaryMaterial.uniforms.end.value = new THREE.Vector2(1.5, height);
+				renderer.render(createBoundaryScene, camera, boundaryTextureB, false);
+				var t = boundaryTextureA;
+				boundaryTextureA = boundaryTextureB;
+				boundaryTextureB = t;
+
+				// right wall of 1 pixel
+				createBoundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+				createBoundaryMaterial.uniforms.start.value = new THREE.Vector2(width - 1.5, 0);
+				createBoundaryMaterial.uniforms.end.value = new THREE.Vector2(width, height);
+				renderer.render(createBoundaryScene, camera, boundaryTextureB, false);
+				var t = boundaryTextureA;
+				boundaryTextureA = boundaryTextureB;
+				boundaryTextureB = t;
+			}
+
+			// Function to reset velocity, temperature, and density textures
+			function resetDisplayTextures() {
+				// Sets all values in textures to 0
+				renderer.clearTarget(velA, true, false, false);
+				renderer.clearTarget(velB, true, false, false);
+				renderer.clearTarget(temperatureA, true, false, false);
+				renderer.clearTarget(temperatureB, true, false, false);
+				renderer.clearTarget(densityA, true, false, false);
+				renderer.clearTarget(densityB, true, false, false);
+				renderer.clearTarget(pressureA, true, false, false);
+				renderer.clearTarget(pressureB, true, false, false);
+				renderer.clearTarget(vorticityA, true, false, false);
+				renderer.clearTarget(vorticityB, true, false, false);
+				renderer.clearTarget(psiA, true, false, false);
+				renderer.clearTarget(psiB, true, false, false);
+			}
+
+			// Function to create the materials, scenes, and textures needed for rendering
+			function buffer_texture_setup(){
+				// Initializing the textures
+				divergenceA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				divergenceB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				velA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+				velB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+				pressureA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				pressureB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				temperatureA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				temperatureB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				densityA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				densityB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.HalfFloatType, format: THREE.RGBAFormat});
+				boundaryTextureA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat});
+				boundaryTextureB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, format: THREE.RGBAFormat});
+				vorticityA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+				vorticityB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+				psiA = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+				psiB = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, type: THREE.FloatType, format: THREE.RGBAFormat});
+
+				displayTexture = new THREE.WebGLRenderTarget(width, height, { minFilter: THREE.LinearFilter, format: THREE.RGBAFormat});
+
+				var plane = new THREE.PlaneBufferGeometry(width, height);
+				/* EXTERNAL FORCE MATERIALS START */
+
+				//EXTERNAL FORCE VELOCITY
+				velocityForceMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						bufferTexture: {type: "t", value: velA},
+						res : {type: 'v2', value: res},
+						smokeSource: {type:"v3", value: new THREE.Vector3(0, 0, 0)},
+						radius: {type: 'f', value: input.Radius},
+						boundary: {type: 't', value: boundaryTextureA},
+					},
+					fragmentShader: window.shaders.exForceVelocityShader,
+				});
+				var velocityForceObject = new THREE.Mesh(plane, velocityForceMaterial);
+				velocityForceScene = new THREE.Scene();
+				velocityForceScene.add(velocityForceObject);
+
+				//EXTERNAL FORCE TEMPERATURE
+				temperatureForceMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						bufferTexture: {type: "t", value: temperatureA},
+						res : {type: 'v2', value: res},
+						smokeSource: {type:"v3", value: new THREE.Vector3(0, 0, 0)},
+						radius: {type: 'f', value: input.Radius},
+						boundary: {type: 't', value: boundaryTextureA},
+					},
+					fragmentShader: window.shaders.exForceTemperatureShader,
+
+				});
+				var temperatureForceObject = new THREE.Mesh(plane, temperatureForceMaterial);
+				temperatureForceScene = new THREE.Scene();
+				temperatureForceScene.add(temperatureForceObject);
+
+				//EXTERNAL FORCE DENSITY
+				densityForceMaterial = new THREE.ShaderMaterial({
+					uniforms:  {
+						bufferTexture: {type: "t", value: densityA},
+						res : {type: 'v2', value: res},
+						smokeSource: {type:"v3", value: new THREE.Vector3(0, 0, 0)},
+						radius: {type: 'f', value: input.Radius},
+						boundary: {type: 't', value: boundaryTextureA},
+					},
+					fragmentShader: window.shaders.exForceDensityShader,
+				});
+				var densityForceObject = new THREE.Mesh(plane, densityForceMaterial);
+				densityForceScene = new THREE.Scene();
+				densityForceScene.add(densityForceObject);
+
+				/* EXTERNAL FORCE MATERIALS END*/
+
+				// Initializing the material and object used for creating boundary conditions
+				createBoundaryMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res: {type: 'v2', value: res},
+						boundary: {type: 't', value: boundaryTextureA},
+						start: {type: 'v2', value: new THREE.Vector2(0, 0)},
+						end: {type: 'v2', value: new THREE.Vector2(width, 1.5)},
+					},
+					fragmentShader: window.shaders.createBoundaryShader,
+				});
+				var createBoundaryObject = new THREE.Mesh(plane, createBoundaryMaterial);
+				createBoundaryScene = new THREE.Scene();
+				createBoundaryScene.add(createBoundaryObject);
+
+				// Initializing the material and object used for enforcing boundary conditions
+				boundaryMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						texture: {type: "t", value: velA},
+						boundary: {type: "t", value: boundaryTextureA},
+						res: {type: 'v2', value: res},
+						mode: {type: 'f', value: 1},
+						scale: {type:"f", value: 1},
+					},
+					fragmentShader: window.shaders.boundaryShader,
+
+				});
+				var boundaryObject = new THREE.Mesh(plane, boundaryMaterial);
+				boundaryScene = new THREE.Scene();
+				boundaryScene.add(boundaryObject);
+
+				// Initializing the material and object used for advecting velocity
+				velocityAdvectionMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						bufferTexture: {type: "t", value: velA},
+						velocity: {type: "t", value: velA},
+						res : {type: 'v2', value: res},
+						dt: {type: "f", value: input.Timestep},
+						dx: {type: "f", value: input.dx},
+					},
+					fragmentShader: window.shaders.advectionShader,
+				});
+				var velocityAdvectionObject = new THREE.Mesh(plane, velocityAdvectionMaterial);
+				velocityAdvectionScene = new THREE.Scene();
+				velocityAdvectionScene.add(velocityAdvectionObject);
+
+
+				// Initializing the material and object used for advecting temperature
+				temperatureAdvectionMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						bufferTexture: {type: "t", value: temperatureA},
+						velocity: {type: "t", value: velA},
+						res : {type: 'v2', value: res},
+						dt: {type: "f", value: input.Timestep},
+						dx: {type: "f", value: input.dx},
+					},
+					fragmentShader: window.shaders.advectionShader,
+				});
+				var temperatureAdvectionObject = new THREE.Mesh(plane, temperatureAdvectionMaterial);
+				temperatureAdvectionScene = new THREE.Scene();
+				temperatureAdvectionScene.add(temperatureAdvectionObject);
+
+
+				// Initializing the material and object used for advecting density
+				densityAdvectionMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						bufferTexture: {type: "t", value: densityA},
+						velocity: {type: "t", value: velA},
+						res : {type: 'v2', value: res},
+						dt: {type: "f", value: input.Timestep},
+						dx: {type: "f", value: input.dx},
+					},
+					fragmentShader: window.shaders.advectionShader,
+				});
+				var densityAdvectionObject = new THREE.Mesh(plane, densityAdvectionMaterial);
+				densityAdvectionScene = new THREE.Scene();
+				densityAdvectionScene.add(densityAdvectionObject);
+
+				// Initializing the material and object used for computing buoyancy force
+				buoyancyMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						temperature: {type: "t", value: temperatureA},
+						velocity: {type: "t", value: velA},
+						density: {type: "t", value: densityA},
+						dt: {type: "f", value: input.Timestep},
+						T0: {type: "f", value: input.AmbientTemp},
+						sigma: {type: "f", value: input.Buoyancy},
+						kappa: {type: "f", value: input.Weight},
+					},
+					fragmentShader: window.shaders.buoyancyShader,
+				});
+				var buoyancyObject = new THREE.Mesh(plane, buoyancyMaterial);
+				buoyancyScene = new THREE.Scene();
+				buoyancyScene.add(buoyancyObject);
+
+				// Initializing the material and object used for computing velocity diffusion
+				var alpha = (input.dx * input.dx) / (input.Viscosity * input.Timestep);
+				diffusionMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						x: {type: "t", value: velA},
+						b: {type: "t", value: velA},
+						res : {type: 'v2', value: res},
+						alpha: {type:"f", value: alpha},
+						rBeta: {type:"f", value: 1.0 / (4.0 + alpha)},
+					},
+					fragmentShader: window.shaders.jacobiShader,
+
+				});
+				var diffusionObject = new THREE.Mesh(plane, diffusionMaterial);
+				diffusionScene = new THREE.Scene();
+				diffusionScene.add(diffusionObject);
+
+				// Initializing the material and object used for computing velocity divergence
+				divergenceMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						w: {type: "t", value: velA},
+						dx: {type:"f", value: input.dx},
+					},
+					fragmentShader: window.shaders.divergenceShader,
+
+				});
+				var divergenceObject = new THREE.Mesh(plane, divergenceMaterial);
+				divergenceScene = new THREE.Scene();
+				divergenceScene.add(divergenceObject);
+
+				// Initializing the material and object used for computing pressure
+				pressureMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						x: {type: "t", value: pressureA},
+						b: {type: "t", value: divergenceA},
+						res : {type: 'v2', value: res},
+						alpha: {type:"f", value: -1 * input.dx * input.dx},
+						rBeta: {type:"f", value: 0.25},
+					},
+					fragmentShader: window.shaders.jacobiShader,
+
+				});
+				var pressureObject = new THREE.Mesh(plane, pressureMaterial);
+				pressureScene = new THREE.Scene();
+				pressureScene.add(pressureObject);
+
+				// Initializing the material and object used for computing the divergence free velocity
+				gradientMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						p: {type: "t", value: pressureA},
+						v: {type: "t", value: velA},
+						dx: {type:"f", value: input.dx},
+					},
+					fragmentShader: window.shaders.gradientShader,
+
+				});
+				var gradientObject = new THREE.Mesh(plane, gradientMaterial);
+				gradientScene = new THREE.Scene();
+				gradientScene.add(gradientObject);
+
+				// Initializing the materials and objects used for computing vorticity
+				curlMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						u: {type: "t", value: velA},
+						dx: {type:"f", value: input.dx},
+					},
+					fragmentShader: window.shaders.curlShader,
+
+				});
+				var curlObject = new THREE.Mesh(plane, curlMaterial);
+				curlScene = new THREE.Scene();
+				curlScene.add(curlObject);
+
+				normalizeMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						w: {type: "t", value: vorticityA},
+						dx: {type:"f", value: input.dx},
+					},
+					fragmentShader: window.shaders.normalizeShader,
+
+				});
+				var normalizeObject = new THREE.Mesh(plane, normalizeMaterial);
+				normalizeScene = new THREE.Scene();
+				normalizeScene.add(normalizeObject);
+
+				vorticityForceMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						w: {type: "t", value: vorticityA},
+						psi: {type: 't', value: psiA},
+						velocity: {type: 't', value: velA},
+						dx: {type:"f", value: input.dx},
+						epsilon: {type: 'f', value: input.Epsilon},
+						dt: {type: 'f', value: input.Timestep},
+					},
+					fragmentShader: window.shaders.vorticityForceShader,
+
+				});
+				var vorticityForceObject = new THREE.Mesh(plane, vorticityForceMaterial);
+				vorticityForceScene = new THREE.Scene();
+				vorticityForceScene.add(vorticityForceObject);
+
+				resetMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res : {type: 'v2', value: res},
+						bufferTexture: {type: "t", value: densityA},
+						boundaryA: {type: 't', value: boundaryTextureA},
+						boundaryB: {type: 't', value: boundaryTextureB},
+					},
+					fragmentShader: window.shaders.resetShader,
+
+				});
+				var resetObject = new THREE.Mesh(plane, resetMaterial);
+				resetScene = new THREE.Scene();
+				resetScene.add(resetObject);
+
+				// Initializing the material and object used for the display
+				var color = hexToRgb(input.Color);
+				displayMaterial = new THREE.ShaderMaterial({
+					uniforms: {
+						res: {type: 'v2', value: res},
+						bufferTexture: {type: 't', value: velA},
+						boundary: {type: 't', value: boundaryTextureA},
+						displayBoundaries: {type: 'f', value: (input.ShowBoundaries ? 1 : 0)},
+						color: {type: 'v3', value: new THREE.Vector3(color.r / 255, color.g / 255, color.b / 255)},
+						scaleColor: {type: 'f', value: input.ScaleColor},
+						biasColor: {type: 'f', value: input.BiasColor},
+						showInsideBoundaries: {type : 'f', value: 0},
+					},
+					fragmentShader: window.shaders.displayShader,
+				})
+				var displayObject = new THREE.Mesh(plane, displayMaterial);
+				displayScene = new THREE.Scene();
+				displayScene.add(displayObject);
+
+
+				/* DRAW TEXTURE TO SCENE START */
+
+				finalMaterial = new THREE.MeshBasicMaterial({map: displayTexture});
+				quad = new THREE.Mesh(plane, finalMaterial);
+				scene.add(quad);
+
+				/* DRAW TEXTURE TO SCENE END */
+
+				resetBoundary();
+			}
+			buffer_texture_setup();
+
+			//Send position of smoke source with values
+			function UpdateMousePosition(X,Y){
+				// scale the x and y positions for faster rendering
+				var mouseX = X * width / window.innerWidth;
+				var mouseY = height - (Y * height / window.innerHeight);
+
+				// Update position of the gui
+				rect = gui.domElement.getBoundingClientRect();
+				left = rect.left * width / window.innerWidth;
+				right = rect.right * width / window.innerWidth;
+				bot = height - ((rect.bottom + 20) * height / window.innerHeight);
+				top = height - (rect.top * height / window.innerHeight);
+
+				/* EXTERNAL FORCE - GET MOUSE POSITION START */
+				// Ignore clicks on gui
+				if (mouseX > right || mouseY > top || mouseX < left || mouseY < bot) {
+					densityForceMaterial.uniforms.smokeSource.value.x = mouseX;
+					densityForceMaterial.uniforms.smokeSource.value.y = mouseY;
+
+					temperatureForceMaterial.uniforms.smokeSource.value.x = mouseX;
+					temperatureForceMaterial.uniforms.smokeSource.value.y = mouseY;
+
+					velocityForceMaterial.uniforms.smokeSource.value.x = mouseX;
+					velocityForceMaterial.uniforms.smokeSource.value.y = mouseY;
+				} else {
+					densityForceMaterial.uniforms.smokeSource.value.x = res.x + input.Radius + 1;
+					densityForceMaterial.uniforms.smokeSource.value.y = input.Radius + 1;
+
+					temperatureForceMaterial.uniforms.smokeSource.value.x = res.x + input.Radius + 1;
+					temperatureForceMaterial.uniforms.smokeSource.value.y = res.y + input.Radius + 1;
+
+					velocityForceMaterial.uniforms.smokeSource.value.x = res.x + input.Radius + 1;
+					velocityForceMaterial.uniforms.smokeSource.value.y = res.y + input.Radius + 1;
+				}
+				/* EXTERNAL FORCE - GET MOUSE POSITION END */
+			}
+			document.onmousemove = function(event){
+				UpdateMousePosition(event.clientX, event.clientY)
+			}
+
+			document.onmousedown = function(event){
+				/* EXTERNAL FORCE - ADD INPUT START */
+				velocityForceMaterial.uniforms.smokeSource.value.z = input.Density;
+				temperatureForceMaterial.uniforms.smokeSource.value.z = input.Temperature;
+				densityForceMaterial.uniforms.smokeSource.value.z = input.Density;
+				/* EXTERNAL FORCE - ADD VALUE END*/
+
+				/* ADD BOUNDARIES - START */
+				startX = event.clientX * width / window.innerWidth;
+				startY = height - (event.clientY * height / window.innerHeight);
+				/* ADD BOUNDARIES - END */
+			}
+
+			document.onmouseup = function(event){
+				/* EXTERNAL FORCE - STOP ADDING INPUT START */
+				velocityForceMaterial.uniforms.smokeSource.value.z = 0;
+				densityForceMaterial.uniforms.smokeSource.value.z = 0;
+				temperatureForceMaterial.uniforms.smokeSource.value.z = 0;
+				/* EXTERNAL FORCE - STOP ADDING INPUT END */
+
+				/* ADD BOUNDARIES - START */
+				endX = event.clientX * width / window.innerWidth;
+				endY = height - (event.clientY * height / window.innerHeight);
+				var start = new THREE.Vector2(Math.min(startX, endX), Math.min(startY, endY));
+				var end = new THREE.Vector2(Math.max(startX, endX), Math.max(startY, endY))
+				createBoundaryMaterial.uniforms.res.value = res;
+				createBoundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+				createBoundaryMaterial.uniforms.start.value = start;
+				createBoundaryMaterial.uniforms.end.value = end;
+
+				// Update position of the gui
+				rect = gui.domElement.getBoundingClientRect();
+				left = rect.left * width / window.innerWidth;
+				right = rect.right * width / window.innerWidth;
+				bot = height - ((rect.bottom + 20) * height / window.innerHeight);
+				top = height - (rect.top * height / window.innerHeight);
+
+				// Only add boundaries if needed and ignore clicks on GUI
+				if (input.Mode === 'Add Boundaries' && (start.x > right || start.y > top || end.x < left || end.y < bot)) {
+					renderer.render(createBoundaryScene, camera, boundaryTextureB, false);
+					var t = boundaryTextureA;
+					boundaryTextureA = boundaryTextureB;
+					boundaryTextureB = t;
+				}
+				/* ADD BOUNDARIES - END */
+			}
+
+			// Function that enforces zero horizontal velocity at vertical walls and zero vertical velocity at horizontal walls
+			function apply_velocity_boundaries() {
+				if (input.UseBoundaries) {
+					boundaryMaterial.uniforms.texture.value = velA;
+					boundaryMaterial.uniforms.res.value = res;
+					boundaryMaterial.uniforms.mode.value = 1;
+					boundaryMaterial.uniforms.scale.value = -1;
+					boundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+					renderer.render(boundaryScene, camera, velB, false);
+					var t = velA;
+					velA = velB;
+					velB = t;
+				}
+			}
+
+			// Function that enforces continuity of pressure
+			function apply_pressure_boundaries() {
+				if (input.UseBoundaries) {
+					boundaryMaterial.uniforms.texture.value = pressureA;
+					boundaryMaterial.uniforms.res.value = res;
+					boundaryMaterial.uniforms.mode.value = 0;
+					boundaryMaterial.uniforms.scale.value = 1;
+					boundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+					renderer.render(boundaryScene, camera, pressureB, false);
+					var t = pressureA;
+					pressureA = pressureB;
+					pressureB = t;
+				}
+			}
+
+			// Function that enforces zero temperature inside of boundaries
+			function apply_temperature_boundaries() {
+				if (input.UseBoundaries) {
+					boundaryMaterial.uniforms.texture.value = temperatureA;
+					boundaryMaterial.uniforms.res.value = res;
+					boundaryMaterial.uniforms.mode.value = 0;
+					boundaryMaterial.uniforms.scale.value = 1;
+					boundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+					renderer.render(boundaryScene, camera, temperatureB, false);
+					var t = pressureA;
+					pressureA = pressureB;
+					pressureB = t;
+				}
+			}
+
+			// Function that enforces zero density inside of boundaries
+			function apply_density_boundaries() {
+				if (input.UseBoundaries) {
+					boundaryMaterial.uniforms.texture.value = densityA;
+					boundaryMaterial.uniforms.res.value = res;
+					boundaryMaterial.uniforms.mode.value = 0;
+					boundaryMaterial.uniforms.scale.value = 1;
+					boundaryMaterial.uniforms.boundary.value = boundaryTextureA;
+					renderer.render(boundaryScene, camera, densityB, false);
+					var t = densityA;
+					densityA = densityB;
+					densityB = t;
+				}
+			}
+
+				//Render everything!
+			function render() {
+
+				// Telling the browser to re-render continuously
+				requestAnimationFrame( render );
+
+				// Advecting velocity
+				velocityAdvectionMaterial.uniforms.dx.value = input.dx;
+				velocityAdvectionMaterial.uniforms.bufferTexture.value = velA;
+				velocityAdvectionMaterial.uniforms.velocity.value = velA;
+				velocityAdvectionMaterial.uniforms.dt.value = input.Timestep;
+				velocityAdvectionMaterial.uniforms.res.value = res;
+				renderer.render(velocityAdvectionScene, camera, velB, false);
+				var t = velA;
+				velA = velB;
+				velB = t;
+
+				// Apply velocity conditions at boundaries
+				apply_velocity_boundaries();
+
+
+				// Advecting temperature
+				temperatureAdvectionMaterial.uniforms.dx.value = input.dx;
+				temperatureAdvectionMaterial.uniforms.bufferTexture.value = temperatureA;
+				temperatureAdvectionMaterial.uniforms.velocity.value = velA;
+				temperatureAdvectionMaterial.uniforms.dt.value = input.Timestep;
+				temperatureAdvectionMaterial.uniforms.res.value = res;
+				renderer.render(temperatureAdvectionScene, camera, temperatureB, false);
+				var t = temperatureA;
+				temperatureA = temperatureB;
+				temperatureB = t;
+
+				// Apply temperature conditions at boundaries
+				apply_temperature_boundaries();
+
+
+				// Advecting density
+				densityAdvectionMaterial.uniforms.dx.value = input.dx;
+				densityAdvectionMaterial.uniforms.bufferTexture.value = densityA;
+				densityAdvectionMaterial.uniforms.velocity.value = velA;
+				densityAdvectionMaterial.uniforms.dt.value = input.Timestep;
+				densityAdvectionMaterial.uniforms.res.value = res;
+				renderer.render(densityAdvectionScene, camera, densityB, false);
+				var t = densityA;
+				densityA = densityB;
+				densityB = t;
+
+				// Apply density conditions at boundaries
+				apply_density_boundaries();
+
+
+				// Diffusing velocity
+				var alpha = input.dx * input.dx / (input.Viscosity * input.Timestep);
+				diffusionMaterial.uniforms.alpha.value = alpha;
+				diffusionMaterial.uniforms.rBeta.value = 1.0 / (4.0 + alpha);
+				diffusionMaterial.uniforms.res.value = res;
+				for (var i = 0; i < input.JacobiIterations; i++) {
+					diffusionMaterial.uniforms.x.value = velA;
+					diffusionMaterial.uniforms.b.value = velA;
+					renderer.render(diffusionScene, camera, velB, false);
+					var t = velA;
+					velA = velB;
+					velB = t;
+					// Applying velocity condition at boundaries
+					apply_velocity_boundaries();
+				}
+
+				// Adding buoyancy force
+				buoyancyMaterial.uniforms.temperature.value = temperatureA;
+				buoyancyMaterial.uniforms.velocity.value = velA;
+				buoyancyMaterial.uniforms.density.value = densityA;
+				buoyancyMaterial.uniforms.T0.value = input.AmbientTemp;
+				buoyancyMaterial.uniforms.dt.value = input.Timestep;
+				buoyancyMaterial.uniforms.res.value = res;
+				buoyancyMaterial.uniforms.sigma.value = input.Buoyancy;
+				buoyancyMaterial.uniforms.kappa.value = input.Weight;
+				renderer.render(buoyancyScene, camera, velB, false);
+				var t = velA;
+				velA = velB;
+				velB = t;
+
+				// Apply velocity conditions at boundaries
+				apply_velocity_boundaries();
+
+				/* Adding vorticity force */
+				// Computing vorticity
+				curlMaterial.uniforms.res.value = res;
+				curlMaterial.uniforms.u.value = velA;
+				curlMaterial.uniforms.dx.value = input.dx;
+				renderer.render(curlScene, camera, vorticityB, false);
+				var t = vorticityA;
+				vorticityA = vorticityB;
+				vorticityB = t;
+
+				// Normalizing the gradient of the absolute value of the vorticity
+				normalizeMaterial.uniforms.res.value = res;
+				normalizeMaterial.uniforms.w.value = vorticityA;
+				normalizeMaterial.uniforms.dx.value = input.dx;
+				renderer.render(normalizeScene, camera, psiB, false);
+				var t = psiA;
+				psiA = psiB;
+				psiB = t;
+
+				// Computing force applied by vorticity
+				vorticityForceMaterial.uniforms.res.value = res;
+				vorticityForceMaterial.uniforms.w.value = vorticityA;
+				vorticityForceMaterial.uniforms.psi.value = psiA;
+				vorticityForceMaterial.uniforms.velocity.value = velA;
+				vorticityForceMaterial.uniforms.dx.value = input.dx;
+				vorticityForceMaterial.uniforms.epsilon.value = input.Epsilon;
+				vorticityForceMaterial.uniforms.dt.value = input.Timestep;
+				renderer.render(vorticityForceScene, camera, velB, false);
+				var t = velA;
+				velA = velB;
+				velB = t;
+
+				/* End vorticity force */
+
+
+				/* EXTERNAL FORCE - RENDER START */
+				if (input.Mode === 'Add Smoke') {
+
+					//EXTERNAL FORCE VELOCITY
+					velocityForceMaterial.uniforms.bufferTexture.value = velA;
+					velocityForceMaterial.uniforms.res.value = res;
+					velocityForceMaterial.uniforms.radius.value = input.Radius;
+					renderer.render(velocityForceScene, camera, velB, false);
+					var t = velA;
+					velA = velB;
+					velB = t;
+
+					// Apply velocity conditions at boundaries
+					apply_velocity_boundaries();
+
+					//EXTERNAL FORCE TEMPERATURE
+					temperatureForceMaterial.uniforms.bufferTexture.value = temperatureA;
+					temperatureForceMaterial.uniforms.res.value = res;
+					temperatureForceMaterial.uniforms.radius.value = input.Radius;
+					renderer.render(temperatureForceScene, camera, temperatureB, false);
+					var t = temperatureA;
+					temperatureA = temperatureB;
+					temperatureB = t;
+
+					//EXTERNAL FORCE DENSITY
+					densityForceMaterial.uniforms.bufferTexture.value = densityA;
+					densityForceMaterial.uniforms.res.value = res;
+					densityForceMaterial.uniforms.radius.value = input.Radius;
+					renderer.render(densityForceScene, camera, densityB, false);
+					var t = densityA;
+					densityA = densityB;
+					densityB = t;
+				}
+
+				/* EXTERNAL FORCE - RENDER END */
+
+				// Calculating divergence of velocity
+				divergenceMaterial.uniforms.w.value = velA;
+				divergenceMaterial.uniforms.dx.value = input.dx;
+				divergenceMaterial.uniforms.res.value = res;
+				renderer.render(divergenceScene, camera, divergenceB, false);
+				var t = divergenceA;
+				divergenceA = divergenceB;
+				divergenceB = t;
+
+				// Use zero as our initial guess for pressure
+				renderer.clearTarget(pressureA, true, false, false);
+
+				// Computing pressure
+				pressureMaterial.uniforms.b.value = divergenceA;
+				pressureMaterial.uniforms.alpha.value = -1 * input.dx * input.dx;
+				pressureMaterial.uniforms.res.value = res;
+				pressureMaterial.uniforms.rBeta.value = 0.25;
+				for (var i = 0; i < input.JacobiIterations; i++) { // reduced number of iterations for faster rendering
+					pressureMaterial.uniforms.x.value = pressureA;
+					renderer.render(pressureScene, camera, pressureB, false);
+					var t = pressureA;
+					pressureA = pressureB;
+					pressureB = t;
+
+					// Apply pressure condition at boundaries
+					apply_pressure_boundaries();
+				}
+
+				// Compute divergence free velocity
+				gradientMaterial.uniforms.p.value = pressureA;
+				gradientMaterial.uniforms.v.value = velA;
+				gradientMaterial.uniforms.dx.value = input.dx;
+				gradientMaterial.uniforms.res.value = res;
+				renderer.render(gradientScene, camera, velB, false);
+				var t = velA;
+				velA = velB;
+				velB = t;
+
+				// Apply velocity conditions at boundaries
+				apply_velocity_boundaries();
+
+				displayMaterial.uniforms.res.value = res;
+				displayMaterial.uniforms.boundary.value = boundaryTextureA;
+				displayMaterial.uniforms.displayBoundaries.value = (input.ShowBoundaries ? 1 : 0);
+				var color = hexToRgb(input.Color);
+				displayMaterial.uniforms.color.value = new THREE.Vector3(color.r / 255, color.g / 255, color.b / 255);
+
+				/* CHANGE DISPLAY BASED ON GUI INPUT */
+				if (input.Display === "Velocity") {
+					displayMaterial.uniforms.bufferTexture.value = velA;
+					input.ScaleColor = 0.5;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 1;
+				} else if (input.Display === "Temperature") {
+					displayMaterial.uniforms.bufferTexture.value = temperatureA;
+					input.ScaleColor = 0.5;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 0;
+				} else if (input.Display === 'Pressure') {
+					displayMaterial.uniforms.bufferTexture.value = pressureA;
+					input.ScaleColor = 50;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 1;
+				} else if (input.Display === 'Divergence') {
+					displayMaterial.uniforms.bufferTexture.value = divergenceA;
+					input.ScaleColor = 50;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 1;
+				} else if (input.Display === 'Vorticity') {
+					displayMaterial.uniforms.bufferTexture.value = vorticityA;
+					input.ScaleColor = 1;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 1;
+				} else if (input.Display === 'Normalized Vorticity') {
+					displayMaterial.uniforms.bufferTexture.value = psiA;
+					input.ScaleColor = 0.5;
+					input.BiasColor = 0.5;
+					input.ShowInsideBoundaries = 1;
+				} else {
+					displayMaterial.uniforms.bufferTexture.value = densityA;
+					input.ScaleColor = 1;
+					input.BiasColor = 0;
+					input.ShowInsideBoundaries = 0;
+				}
+				displayMaterial.uniforms.scaleColor.value = input.ScaleColor;
+				displayMaterial.uniforms.biasColor.value = input.BiasColor;
+				displayMaterial.uniforms.showInsideBoundaries.value = input.ShowInsideBoundaries;
+				renderer.render(displayScene, camera, displayTexture, false);
+
+				// Finally, draw to the screen
+				renderer.render(scene, camera);
+
+			}
+			render();
+
+
+		</script>
+	</body>
+</html>
